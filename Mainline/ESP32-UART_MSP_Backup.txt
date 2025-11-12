@@ -17,7 +17,7 @@
 StaticJsonDocument<JSON_ARRAY_SIZE(MAX_ADC_VALUES) + JSON_OVERHEAD> doc;
 
 constexpr char WIFI_SSID[] = "IoT Server";
-constexpr char WIFI_PASSWORD[] = "Floridemar3";
+constexpr char WIFI_PASSWORD[] = "PASSWORD";
 constexpr char THINGSBOARD_SERVER[] = "192.168.139.32";
 constexpr uint16_t THINGSBOARD_PORT = ENCRYPTED ? 8883U : 1883U;
 constexpr char TOKEN[] = "FU2288y6XZZqCTvjpYfN";

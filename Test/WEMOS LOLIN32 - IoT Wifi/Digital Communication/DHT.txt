@@ -5,7 +5,7 @@
 #include <PubSubClient.h>
  
 #define WIFI_AP "IoT Server"
-#define WIFI_PASS "Floridemar3"
+#define WIFI_PASS "WIFI_PASSWORD"
  
 #define TB_SERVER "192.168.0.194"
 #define TOKEN "SQGkD55YSI7iU31FdkRk"

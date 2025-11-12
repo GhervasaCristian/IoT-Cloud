@@ -2,7 +2,7 @@
 #include <PubSubClient.h>
 
 #define WIFI_SSID    "IoT Server"
-#define WIFI_PASSWORD "Floridemar3"
+#define WIFI_PASSWORD "WIFI_PASSWORD"
 
 #define TB_SERVER    "192.168.0.194"
 #define TOKEN        "FU2288y6XZZqCTvjpYfN"

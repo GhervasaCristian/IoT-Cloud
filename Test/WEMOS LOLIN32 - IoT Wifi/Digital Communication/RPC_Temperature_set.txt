@@ -20,8 +20,8 @@
 
 
 // ——— Configuration ———
-constexpr char WIFI_SSID[]       = "Reparatii Laptop 0774 606 388";
-constexpr char WIFI_PASSWORD[]   = "Bile20kg";
+constexpr char WIFI_SSID[]       = "SSID";
+constexpr char WIFI_PASSWORD[]   = "WIFI_PASSWORD";
 constexpr char TB_SERVER[]       = "192.168.0.194";
 constexpr char THINGSBOARD_SERVER[]       = "192.168.0.194";
 
