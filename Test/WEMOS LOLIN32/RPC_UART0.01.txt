@@ -1,0 +1,180 @@
+#ifdef ESP8266
+  #include <ESP8266WiFi.h>
+#else
+  #ifdef ESP32
+    #include <WiFi.h>
+    #include <WiFiClientSecure.h>
+  #endif
+#endif
+
+//working uart, not really working rpc, he is connecting but not receiving smth
+
+
+#include <PubSubClient.h>            // telemetry
+#include <Arduino_MQTT_Client.h>     // RPC
+#include <Server_Side_RPC.h>
+#include <ThingsBoard.h>
+
+// ——— CONFIG ———
+#define ENCRYPTED false
+constexpr char WIFI_SSID[]     = "Reparatii Laptop 0774606388";
+constexpr char WIFI_PASSWORD[] = "Bile20kg";
+constexpr char TB_SERVER[]     = "192.168.0.194";
+constexpr uint16_t TB_PORT     = 1883;
+constexpr char TOKEN[]         = "FU2288y6XZZqCTvjpYfN";
+
+constexpr uint16_t MAX_RX = 256, MAX_TX = 256;
+constexpr uint32_t SERIAL_BAUD = 115200;
+
+// RPC method names
+constexpr char RPC_JSON[]    = "example_json";
+constexpr char RPC_TEMP[]    = "example_set_temperature";
+constexpr char RPC_SWITCH[]  = "example_set_switch";
+constexpr char KEY_TEMP[]    = "temp";
+constexpr char KEY_SWITCH[]  = "switch";
+
+// ——— HARDWARE ———
+HardwareSerial mySerial(2);  // UART2: RX=16, TX=17
+#define UART_BAUD 115200
+#define LED_PIN   2
+
+// ——— TELEMETRY CLIENT ———
+WiFiClient    espClient;
+PubSubClient  client(espClient);
+
+// ——— RPC CLIENT ———
+WiFiClient            tbWiFiClient;
+Arduino_MQTT_Client   mqttClient(tbWiFiClient);
+Server_Side_RPC<3,5>  rpcHandler;
+std::array<IAPI_Implementation*,1> apis = { &rpcHandler };
+ThingsBoard tb(mqttClient, MAX_RX, MAX_TX, Default_Max_Stack_Size, apis);
+
+// ——— HELPERS ———
+void connectWiFi() {
+  Serial.print("WiFi connecting");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println(" ✓");
+}
+
+// RPC callbacks
+void onExampleJson(const JsonVariantConst& v, JsonDocument& r) {
+  Serial.println("[RPC] example_json");
+  StaticJsonDocument<200> d;
+  d["msg"] = "hello";
+  r["result"] = d;
+}
+
+void onSetTemperature(const JsonVariantConst& v, JsonDocument& r) {
+  float t = v[KEY_TEMP];
+  Serial.printf("[RPC] set_temperature=%.2f\n", t);
+  r["ack"] = t;
+}
+
+void onSetSwitch(const JsonVariantConst& v, JsonDocument& r) {
+  bool s = v[KEY_SWITCH];
+  Serial.printf("[RPC] set_switch=%s\n", s?"ON":"OFF");
+  digitalWrite(LED_PIN, s?HIGH:LOW);
+  r["led"] = s;
+}
+
+// Telemetry from UART
+void sendUARTData() {
+  if (!mySerial.available()) return;
+  String line = mySerial.readStringUntil('\n');
+  line.trim();
+  if (line.length()<3) return;
+
+  int idx=0;
+  while(idx<line.length()) {
+    int comma=line.indexOf(',',idx);
+    String tok = comma<0 ? line.substring(idx)
+                        : line.substring(idx,comma);
+    idx = comma<0 ? line.length() : comma+1;
+    tok.trim();
+    if (tok.length()<3) continue;
+
+    String addr=tok.substring(0,2),
+           val =tok.substring(2);
+    String key;
+         if(addr=="00") key="temperature";
+    else if(addr=="01") key="humidity";
+    else if(addr=="02") key="pressure";
+    else if(addr=="03") key="voltage";
+    else if(addr=="04") key="current";
+    else               key="sensor_"+addr;
+
+    String payload = "{\""+key+"\":"+val+"}";
+    if (!client.connected()) {
+      Serial.println("Telemetry MQTT disconnected!");
+    } else {
+      client.publish("v1/devices/me/telemetry", payload.c_str());
+      Serial.println("TEL → " + payload);
+    }
+    delay(5);
+  }
+}
+
+void reconnectMQTT() {
+  while (!client.connected()) {
+    Serial.print("MQTT connecting...");
+    if (client.connect("ESP32Client", TOKEN, "")) {
+      Serial.println("connected");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println("; retrying in 5s");
+      delay(5000);
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(SERIAL_BAUD);
+  mySerial.begin(UART_BAUD, SERIAL_8N1, 16, 17);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
+  connectWiFi();
+
+  // Telemetry setup
+  client.setServer(TB_SERVER, TB_PORT);
+
+  // RPC setup
+  mqttClient.set_server(TB_SERVER, TB_PORT);
+
+  Serial.println("Connecting RPC...");
+  if (!tb.connect(TB_SERVER, TOKEN, TB_PORT)) {
+    Serial.println("RPC connect FAILED");
+    while(true) delay(1000);
+  }
+  Serial.println("RPC connected");
+
+  // Subscribe RPCs *once*
+  std::array<RPC_Callback,3> cbs = {
+    RPC_Callback{RPC_JSON, onExampleJson},
+    RPC_Callback{RPC_TEMP, onSetTemperature},
+    RPC_Callback{RPC_SWITCH, onSetSwitch}
+  };
+  if (rpcHandler.RPC_Subscribe(cbs.cbegin(), cbs.cend())) {
+    Serial.println("RPC subscribe ✅");
+  } else {
+    Serial.println("RPC subscribe ❌");
+    while(true) delay(1000);
+  }
+}
+
+void loop() {
+  // Telemetry
+  if (!client.connected()) reconnectMQTT();
+  client.loop();
+  sendUARTData();
+
+  // RPC
+  tb.loop();
+
+  delay(10);
+}

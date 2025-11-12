@@ -1,0 +1,124 @@
+//SENDING TEMP OVER UART, WORKING
+//GOOD AS A BASE CODE
+#include <msp430.h>
+#include <stdio.h>
+
+#define CALADC_15V_30C  *((unsigned int *)0x1A1A)  // Temperature Sensor Calibration-30 C
+#define CALADC_15V_85C  *((unsigned int *)0x1A1C)  // Temperature Sensor Calibration-High Temperature
+
+void Init_GPIO();
+void Init_UART();
+void Init_TimerB0();
+void Transmit_Temperature(float tempC);
+
+volatile float temperature = 0.0;
+
+//Global init
+volatile float temp;
+volatile float IntDegF;
+volatile float IntDegC;
+
+
+int main(void)
+{
+    WDTCTL = WDTPW | WDTHOLD;  // Stop watchdog timer
+
+    Init_GPIO();
+    Init_UART();
+    Init_TimerB0();
+    Init_ADC();
+
+    PM5CTL0 &= ~LOCKLPM5;  // Disable the GPIO power-on default high-impedance mode
+
+    __bis_SR_register(GIE);  // Enable global interrupts
+
+    while (1)
+    {
+        __bis_SR_register(LPM0_bits | GIE);  // Enter LPM0 with interrupts enabled
+        __no_operation();  // For debugger
+    }
+}
+
+void Init_GPIO()
+{
+    P1DIR |= BIT0;  // Set P1.0 as output (LED)
+    P1OUT &= ~BIT0;  // Initialize LED to off
+    P1SEL0 |= BIT6 | BIT7;  // Set P1.6 and P1.7 for UART
+}
+
+void Init_UART()
+{
+    UCA0CTLW0 = UCSWRST;  // Put eUSCI in reset
+    UCA0CTLW0 |= UCSSEL__SMCLK;  // Use SMCLK
+    UCA0BR0 = 8;  // 1000000/115200 = 8.68
+    UCA0MCTLW = 0xD600;  // UCBRSx value = 0xD6
+    UCA0BR1 = 0;
+    UCA0CTLW0 &= ~UCSWRST;  // Initialize eUSCI
+}
+
+void Init_TimerB0()
+{
+    TB0CCTL0 = CCIE;  // Enable interrupt for CCR0
+    TB0CCR0 = 32768;  // Set CCR0 for 1-second interval (assuming ACLK = 32.768kHz)
+    TB0CTL = TBSSEL__ACLK | MC__UP | TBCLR;  // Use ACLK, Up mode, clear TAR
+}
+
+void Init_ADC()
+{
+    // Configure ADC - Pulse sample mode; ADCSC trigger
+    ADCCTL0 |= ADCSHT_8 | ADCON;                                  // ADC ON,temperature sample period>30us
+    ADCCTL1 |= ADCSHP;                                            // s/w trig, single ch/conv, MODOSC
+    ADCCTL2 &= ~ADCRES;                                           // clear ADCRES in ADCCTL
+    ADCCTL2 |= ADCRES_2;                                          // 12-bit conversion results
+    ADCMCTL0 |= ADCSREF_1 | ADCINCH_12;                           // ADC input ch A12 => temp sense
+    ADCIE |=ADCIE0;                                               // Enable the Interrupt request for a completed ADC_B conversion
+
+    // Configure reference
+    PMMCTL0_H = PMMPW_H;                                          // Unlock the PMM registers
+    PMMCTL2 |= INTREFEN | TSENSOREN;                              // Enable internal reference and temperature sensor
+    __delay_cycles(400);                                          // Delay for reference settling
+}
+
+void Transmit_Temperature(float tempC)
+{
+    char buffer[10];
+    int len = snprintf(buffer, sizeof(buffer), "%.2f\n", tempC);
+    int i;
+    for (i = 0; i < len; i++)
+    {
+        while (!(UCA0IFG & UCTXIFG));  // Wait for TX buffer to be ready
+        UCA0TXBUF = buffer[i];  // Transmit character
+    }
+}
+
+#pragma vector=TIMER0_B0_VECTOR
+__interrupt void Timer_B0_ISR(void)
+{
+    static unsigned int adc_value = 0;
+    static unsigned int adc_count = 0;
+
+    if (adc_count == 0)
+    {
+        ADCCTL0 |= ADCENC | ADCSC;  // Start ADC conversion
+        adc_count = 1;
+    }
+    else
+    {
+        temp = ADCMEM0;
+        // Temperature in Celsius
+        // The temperature (Temp, C)=
+        IntDegC = (temp-CALADC_15V_30C)*(85-30)/(CALADC_15V_85C-CALADC_15V_30C)+30;
+        Transmit_Temperature(IntDegC);  // Send temperature over UART
+        // Temperature in Fahrenheit
+        // Tf = (9/5)*Tc | 32
+       // IntDegF = 9*IntDegC/5+32;
+        //__bic_SR_register_on_exit(LPM3_bits);               // Exit LPM3
+        adc_count=0;
+    }
+}
+
+#pragma vector=ADC_VECTOR
+__interrupt void ADC_ISR(void)
+{
+    // Handle ADC interrupt if needed
+}

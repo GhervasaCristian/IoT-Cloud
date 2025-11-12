@@ -1,0 +1,94 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+
+#define WIFI_SSID    "Reparatii Laptop 0774606388"
+#define WIFI_PASSWORD "Bile20kg"
+
+#define TB_SERVER    "192.168.0.194"
+#define TOKEN        "FU2288y6XZZqCTvjpYfN"
+
+// Initialize HardwareSerial on UART2 (GPIO16=RX, 17=TX)
+HardwareSerial mySerial(2);
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+void setup() {
+  Serial.begin(115200);
+  mySerial.begin(115200, SERIAL_8N1, /*RX=*/16, /*TX=*/17);
+  connectToWiFi();
+  client.setServer(TB_SERVER, 1883);
+  client.setCallback(mqttCallback);
+}
+
+void loop() {
+  if (!client.connected()) reconnectMQTT();
+  client.loop();
+  sendUARTData();
+  delay(5000);  // send every 5s
+}
+
+void connectToWiFi() {
+  Serial.print("Connecting to WiFi");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected! IP: " + WiFi.localIP().toString());
+}
+
+void reconnectMQTT() {
+  while (!client.connected()) {
+    Serial.print("MQTT connecting...");
+    if (client.connect("ESP32Client", TOKEN, "")) {
+      Serial.println("connected");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println("; retrying in 5s");
+      delay(5000);
+    }
+  }
+}
+
+void sendUARTData() {
+  if (! mySerial.available()) return;
+
+  // read a full line (up to newline)
+  String line = mySerial.readStringUntil('\n');
+  line.trim();
+  if (line.length() < 3) return;  // need at least 2 chars for addr + 1 char data
+
+  String addr = line.substring(0, 2);
+  String data = line.substring(2);
+
+  // map addresses to telemetry keys
+  String key;
+  if      (addr == "00") key = "temperature";
+  else if (addr == "01") key = "humidity";
+  else if (addr == "02") key = "pressure";
+  else if (addr == "03") key = "voltage";
+  else if (addr == "04") key = "current";
+  else {
+    // unknown address: skip or send under a generic key
+    key = "sensor_" + addr;
+  }
+
+  // build JSON payload
+  String payload = "{ \"" + key + "\":" + data + " }";
+  Serial.println("Publishing: " + payload);
+
+  client.publish("v1/devices/me/telemetry", payload.c_str());
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  // optional: handle RPC or attribute updates here
+  Serial.print("MQTT msg on ");
+  Serial.print(topic);
+  Serial.print(": ");
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println();
+}

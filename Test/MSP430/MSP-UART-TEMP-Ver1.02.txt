@@ -1,0 +1,174 @@
+// EXTENDED VERSION: UART RECEIVE + DAC/LED CONTROL + TEMP TX AND IT FUKING WORKS!
+#include <msp430.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+#define CALADC_15V_30C  *((unsigned int *)0x1A1A)
+#define CALADC_15V_85C  *((unsigned int *)0x1A1C)
+
+void Init_GPIO();
+void Init_UART();
+void Init_TimerB0();
+void Init_ADC();
+void Transmit_Temperature(float tempC);
+void LED(unsigned char state);
+void DAC(unsigned char type);
+void Process_Command(const char *cmd);
+
+volatile float temp;
+volatile float IntDegC;
+char uart_buffer[20];
+volatile unsigned int uart_index = 0;
+volatile int i;
+
+int main(void)
+{
+    WDTCTL = WDTPW | WDTHOLD;
+    Init_GPIO();
+    Init_UART();
+    Init_TimerB0();
+    Init_ADC();
+
+    PM5CTL0 &= ~LOCKLPM5;
+    __bis_SR_register(GIE);
+
+    while (1)
+    {
+        __bis_SR_register(LPM0_bits | GIE);
+        __no_operation();
+    }
+}
+
+void Init_GPIO()
+{
+    P1DIR |= BIT0;
+    P1OUT &= ~BIT0;
+    P1SEL0 |= BIT6 | BIT7;  // UART pins
+}
+
+void Init_UART()
+{
+    UCA0CTLW0 = UCSWRST;
+    UCA0CTLW0 |= UCSSEL__SMCLK;
+    UCA0BR0 = 8;
+    UCA0MCTLW = 0xD600;
+    UCA0BR1 = 0;
+    UCA0CTLW0 &= ~UCSWRST;
+    UCA0IE |= UCRXIE;  // Enable RX interrupt
+}
+
+void Init_TimerB0()
+{
+    TB0CCTL0 = CCIE;
+    TB0CCR0 = 32768;
+    TB0CTL = TBSSEL__ACLK | MC__UP | TBCLR;
+}
+
+void Init_ADC()
+{
+    ADCCTL0 |= ADCSHT_8 | ADCON;
+    ADCCTL1 |= ADCSHP;
+    ADCCTL2 &= ~ADCRES;
+    ADCCTL2 |= ADCRES_2;
+    ADCMCTL0 |= ADCSREF_1 | ADCINCH_12;
+    ADCIE |= ADCIE0;
+    PMMCTL0_H = PMMPW_H;
+    PMMCTL2 |= INTREFEN | TSENSOREN;
+    __delay_cycles(400);
+}
+
+void Transmit_Temperature(float tempC)
+{
+    char buffer[10];
+    int len = snprintf(buffer, sizeof(buffer), "%.2f\n", tempC);
+    for (i = 0; i < len; i++)
+    {
+        while (!(UCA0IFG & UCTXIFG));
+        UCA0TXBUF = buffer[i];
+    }
+}
+
+void LED(unsigned char state)
+{
+    if (state)
+        P1OUT |= BIT0;
+    else
+        P1OUT &= ~BIT0;
+}
+
+void DAC(unsigned char type)
+{
+    // Placeholder: Replace with real DAC setup depending on your implementation
+    switch (type)
+    {
+        case 1:
+            // Start Sine DAC
+            break;
+        case 2:
+            // Start Square DAC
+            break;
+        case 3:
+            // Start Sawtooth DAC
+            break;
+        default:
+            break;
+    }
+}
+
+void Process_Command(const char *cmd)
+{
+    if (strncmp(cmd, "LED:", 4) == 0)
+    {
+        int val = atoi(cmd + 4);
+        LED(val);
+    }
+    else if (strncmp(cmd, "DAC:", 4) == 0)
+    {
+        int val = atoi(cmd + 4);
+        DAC(val);
+    }
+}
+
+#pragma vector=USCI_A0_VECTOR
+__interrupt void USCI_A0_ISR(void)
+{
+    if (UCA0IFG & UCRXIFG)
+    {
+        char rx = UCA0RXBUF;
+        if (rx == '\n' || rx == '\r')
+        {
+            uart_buffer[uart_index] = '\0';
+            Process_Command(uart_buffer);
+            uart_index = 0;
+        }
+        else if (uart_index < sizeof(uart_buffer) - 1)
+        {
+            uart_buffer[uart_index++] = rx;
+        }
+    }
+}
+
+#pragma vector=TIMER0_B0_VECTOR
+__interrupt void Timer_B0_ISR(void)
+{
+    static unsigned int adc_count = 0;
+    if (adc_count == 0)
+    {
+        ADCCTL0 |= ADCENC | ADCSC;
+        adc_count = 1;
+    }
+    else
+    {
+        temp = ADCMEM0;
+        IntDegC = (temp - CALADC_15V_30C) * (85 - 30) / (CALADC_15V_85C - CALADC_15V_30C) + 30;
+        Transmit_Temperature(IntDegC);
+        adc_count = 0;
+    }
+}
+
+#pragma vector=ADC_VECTOR
+__interrupt void ADC_ISR(void)
+{
+    // Optional: Add additional ADC logic here
+}

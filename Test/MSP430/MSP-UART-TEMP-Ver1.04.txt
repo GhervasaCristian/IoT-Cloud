@@ -1,0 +1,330 @@
+// EXTENDED VERSION: UART RECEIVE + DAC/LED CONTROL + TEMP TX AND IT FUKING WORKS!
+// ADC + UART WORKING! but we lost temp*
+#include <msp430.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+#define CALADC_15V_30C  *((unsigned int *)0x1A1A)
+#define CALADC_15V_85C  *((unsigned int *)0x1A1C)
+#define ADC_BUFFER_SIZE 200
+volatile unsigned short int adc_buffer[ADC_BUFFER_SIZE];
+volatile unsigned int adc_index = 0;
+volatile unsigned char adc_ready = 0;
+
+
+volatile unsigned short int sine[] = {
+                               2048,  2447,  2831,  3185,  3495,  3750,  3939,
+                               4056,  4095,  4056,  3939,  3750,  3495,  3185,
+                               2831,  2447,  2048,  1649,  1265,   911,   601,
+                                346,   157,    40,     1,    40,   157,   346,
+                                601,   911,  1265,  1649 };
+
+volatile unsigned short int square[] = {
+                                        0,     0,     0,     0,     0,     0,     0,
+                                        0,  4095,  4095,  4095,  4095,  4095,  4095,
+                                     4095,  4095,  4095,  4095,  4095,  4095,  4095,
+                                     4095,  4095,  4095,     0,     0,     0,     0,
+                                        0,     0,     0,     0 };
+
+volatile unsigned short int sawtooth[] = {
+     0,   129,   259,   388,   518,   647,   776,
+   906,  1035,  1164,  1294,  1423,  1553,  1682,
+  1811,  1941,  2070,  2199,  2329,  2458,  2587,
+  2717,  2846,  2976,  3105,  3234,  3364,  3493,
+  3622,  3752,  3881,  4011 };
+
+
+volatile unsigned short int tan[] = {
+  1086,  1191,  1299,  1411,  1529,  1658,  1801,
+  1964,  2156,  2390,  2687,  3088,  3669,  4613,
+  6465, 11950, 32767, -9778, -4293, -2441, -1497,
+  -916,  -515,  -218,    16,   208,   371,   514,
+   643,   761,   873,   981 };
+
+
+
+volatile unsigned short int WaveAux[32];
+
+volatile unsigned int i, i_1, i_2,j,k;
+
+void Init_GPIO();
+void Init_UART();
+void Init_TimerB0();
+void Init_ADC();
+void Transmit_Temperature(float tempC);
+void LED(unsigned char state);
+void DAC(unsigned char type);
+void Process_Command(const char *cmd);
+
+volatile float temp;
+volatile float IntDegC;
+char uart_buffer[20];
+volatile unsigned int uart_index = 0;
+//volatile int i;
+
+int main(void)
+{
+    WDTCTL = WDTPW | WDTHOLD;
+    Init_GPIO();
+    Init_UART();
+    Init_TimerB0();
+    Init_ADC();
+    Init_Values();
+    Init_DAC();
+
+    PM5CTL0 &= ~LOCKLPM5;
+    __bis_SR_register(GIE);
+
+    while (1)
+    {
+        __bis_SR_register(LPM0_bits | GIE);
+        __no_operation();
+    }
+}
+
+void Init_DAC()
+{
+ // Configure reference module
+    PMMCTL0_H = PMMPW_H;                      // Unlock PMM registers
+    PMMCTL2 = INTREFEN | REFVSEL_1;           // Enable 2V internal ref
+    while (!(PMMCTL2 & REFGENRDY));           // Wait for ref to settle
+
+    // Configure SAC2
+    SAC2DAC = DACSREF_1 | DACLSEL_3 | DACIE;   // 2V ref, DAC triggered by TB2.2
+    SAC2DAT = square[i_2];
+    SAC2DAC |= DACEN;                         // Enable DAC
+
+    SAC2OA = NMUXEN | PMUXEN | PSEL_1 | NSEL_1; // OA input settings
+    SAC2OA |= OAPM_0;                          // High-speed mode
+    SAC2PGA = MSEL_1;                          // Buffer mode
+    SAC2OA |= SACEN | OAEN;                    // Enable SAC and OA
+
+    // Configure TimerB2 to generate DAC triggers
+    TB2CCR0 = 200 - 1;
+    TB2CCTL2 = OUTMOD_4;                      // Toggle mode (reset/set also OK)
+    TB2CCR2 = 100;                            // Match at middle
+    TB2CTL = TBSSEL__SMCLK | MC_1 | TBCLR;    // SMCLK, Up mode, Clear
+}
+
+void Init_Values()
+{
+    i = 0;
+    i_1 = 0;          // initial phase square 1
+    i_2 = 0;          // starting at 0 index
+}
+
+void Init_GPIO()
+{
+    P1DIR |= BIT0;
+    P1OUT &= ~BIT0;
+    P1SEL0 |= BIT6 | BIT7;  // UART pins
+
+    // Configure P3.1 for SAC2 OA output
+    P3SEL0 |= BIT1;
+    P3SEL1 |= BIT1;
+
+    //P1.0 Analog input ADC
+    P1SEL0 |= BIT0;
+    P1SEL1 |= BIT0;
+
+}
+
+void Init_UART()
+{
+    UCA0CTLW0 = UCSWRST;
+    UCA0CTLW0 |= UCSSEL__SMCLK;
+    UCA0BR0 = 8;
+    UCA0MCTLW = 0xD600;
+    UCA0BR1 = 0;
+    UCA0CTLW0 &= ~UCSWRST;
+    UCA0IE |= UCRXIE;  // Enable RX interrupt
+}
+
+void Init_TimerB0()
+{
+    TB0CCTL0 = CCIE;
+    TB0CCR0 = 32768;
+    TB0CTL = TBSSEL__ACLK | MC__UP | TBCLR;
+}
+
+void Init_ADC()
+{
+    ADCCTL0 |= ADCSHT_8 | ADCON;
+    ADCCTL1 |= ADCSHP;
+    ADCCTL2 &= ~ADCRES;
+    ADCCTL2 |= ADCRES_2;
+    //ADCMCTL0 |= ADCSREF_1 | ADCINCH_12;   //internal Temp sensor
+    ADCMCTL0 |= ADCSREF_1 | ADCINCH_0;  // A0 = P1.0
+
+    ADCIE |= ADCIE0;
+    PMMCTL0_H = PMMPW_H;
+    PMMCTL2 |= INTREFEN | TSENSOREN;
+    __delay_cycles(400);
+}
+
+void Transmit_ADC_Buffer()
+{
+    while (!(UCA0IFG & UCTXIFG));
+    UCA0TXBUF = 'A';
+    while (!(UCA0IFG & UCTXIFG));
+    UCA0TXBUF = 'D';
+    while (!(UCA0IFG & UCTXIFG));
+    UCA0TXBUF = 'C';
+    while (!(UCA0IFG & UCTXIFG));
+    UCA0TXBUF = ':';
+    while (!(UCA0IFG & UCTXIFG));
+    UCA0TXBUF = '[';
+
+    for ( j = 0; j < ADC_BUFFER_SIZE; j++) {
+        char value_str[6];
+        int len = snprintf(value_str, sizeof(value_str), "%u", adc_buffer[j]);
+        for ( k= 0; k < len; k++) {
+            while (!(UCA0IFG & UCTXIFG));
+            UCA0TXBUF = value_str[k];
+        }
+        if (j < ADC_BUFFER_SIZE - 1) {
+            while (!(UCA0IFG & UCTXIFG));
+            UCA0TXBUF = ',';
+        }
+    }
+    while (!(UCA0IFG & UCTXIFG));
+    UCA0TXBUF = ']';
+    while (!(UCA0IFG & UCTXIFG));
+    UCA0TXBUF = '\n';
+}
+
+void Transmit_Temperature(float tempC)
+{
+    char buffer[10];
+    int len = snprintf(buffer, sizeof(buffer), "%.2f\n", tempC);
+    for (i = 0; i < len; i++)
+    {
+        while (!(UCA0IFG & UCTXIFG));
+        UCA0TXBUF = buffer[i];
+    }
+}
+
+void LED(unsigned char state)
+{
+    if (state)
+        P1OUT |= BIT0;
+    else
+        P1OUT &= ~BIT0;
+}
+
+void DAC(unsigned char type)
+{
+    // Placeholder: Replace with real DAC setup depending on your implementation
+    switch (type)
+    {
+    case 0:
+        for (i = 0; i < 32; i++)
+            WaveAux[i] = 0;
+        break;
+    case 1:
+        for (i = 0; i < 32; i++)
+            WaveAux[i] = sine[i];
+        break;
+    case 2:
+        for (i = 0; i < 32; i++)
+            WaveAux[i] = square[i];
+        break;
+    case 3:
+        for (i = 0; i < 32; i++)
+            WaveAux[i] = sawtooth[i];
+        break;
+    case 4:
+        for (i = 0; i < 32; i++)
+            WaveAux[i] = tan[i];
+        break;
+    default:
+        break;
+    }
+}
+
+void Process_Command(const char *cmd)
+{
+    if (strncmp(cmd, "LED:", 4) == 0)
+    {
+        int val = atoi(cmd + 4);
+        LED(val);
+    }
+    else if (strncmp(cmd, "DAC:", 4) == 0)
+    {
+        int val = atoi(cmd + 4);
+        DAC(val);
+    }
+}
+
+#pragma vector=USCI_A0_VECTOR
+__interrupt void USCI_A0_ISR(void)
+{
+    if (UCA0IFG & UCRXIFG)
+    {
+        char rx = UCA0RXBUF;
+        if (rx == '\n' || rx == '\r')
+        {
+            uart_buffer[uart_index] = '\0';
+            Process_Command(uart_buffer);
+            uart_index = 0;
+        }
+        else if (uart_index < sizeof(uart_buffer) - 1)
+        {
+            uart_buffer[uart_index++] = rx;
+        }
+    }
+}
+
+#pragma vector=TIMER0_B0_VECTOR
+__interrupt void Timer_B0_ISR(void)
+{
+    static unsigned int tick = 0;
+    if (adc_ready) {
+        Transmit_ADC_Buffer();
+        adc_ready = 0;
+    } else if (tick == 0) {
+        ADCCTL0 |= ADCENC | ADCSC;
+    }
+    tick++;
+    if (tick >= 10) tick = 0;
+}
+
+
+#pragma vector=ADC_VECTOR
+__interrupt void ADC_ISR(void)
+{
+    switch (__even_in_range(ADCIV, ADCIV_ADCIFG)) {
+    case ADCIV_NONE: break;
+    case ADCIV_ADCIFG:
+        if (adc_index < ADC_BUFFER_SIZE) {
+            adc_buffer[adc_index++] = ADCMEM0;
+            if (adc_index >= ADC_BUFFER_SIZE) {
+                adc_ready = 1;
+                adc_index = 0;
+            } else {
+                ADCCTL0 |= ADCENC | ADCSC; // Restart ADC
+            }
+        }
+        break;
+    default: break;
+    }
+}
+
+// ISR for SAC2 DAC
+#pragma vector=SAC0_SAC2_VECTOR
+__interrupt void SAC2_ISR(void)
+{
+    switch (__even_in_range(SAC2IV, SACIV_4))
+    {
+        case SACIV_0: break;
+        case SACIV_2: break;
+        case SACIV_4:
+            i_2++;
+            if (i_2 >= sizeof(WaveAux)/sizeof(WaveAux[0]))
+                i_2 = 0;
+            SAC2DAT = WaveAux[i_2];
+            break;
+        default: break;
+    }
+}

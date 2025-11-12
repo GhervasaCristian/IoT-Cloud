@@ -1,0 +1,5 @@
+https://www.youtube.com/watch?v=_iX67plFeLs&t=52s
+
+https://www.youtube.com/redirect?event=video_description&redir_token=QUFFLUhqbXRRcHdUdjhyQlVNRU91aDhQRm54NE9wVFFXUXxBQ3Jtc0trR0gwNnJpazlTaTFudlNOQzBreGJsa1lteDF3bHhJWXN6RFMzZGh5U3JlZnJQOWVMc1M5UGYzazFlWmJUNHBjLTY5Q0w2N1lsNjlVTGcwM1ppNmhnblRuSjZ2UnRxX25FdUxnOXFpZFI4ZWxDa3MtSQ&q=http%3A%2F%2Farduino.esp8266.com%2Fstable%2Fpackage_esp8266com_index.json&v=_iX67plFeLs
+
+esp8266 add to preferecnces another servers

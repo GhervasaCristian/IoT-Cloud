@@ -1,0 +1,88 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+ 
+#define WIFI_AP "IoT Server"
+#define WIFI_PASS "Floridemar3"
+ 
+#define TB_SERVER "192.168.1.230"
+#define TOKEN "SQGkD55YSI7iU31FdkRk"
+ 
+WiFiClient espClient;
+PubSubClient client(espClient);
+ 
+void setup() {
+  // Start the serial communication
+  Serial.begin(115200);
+ 
+  // Connect to Wi-Fi
+  connectToWiFi();
+ 
+  // Set MQTT server and port (default port is 1883)
+  client.setServer(TB_SERVER, 1883);
+ 
+  // Set the callback function for when a message arrives
+  client.setCallback(mqttCallback);
+}
+ 
+void loop() {
+  if (!client.connected()) {
+    reconnectMQTT();
+  }
+ 
+  // Ensure the MQTT client stays connected
+  client.loop();
+ 
+  // Send random data to the server every 5 seconds
+  sendRandomData();
+  delay(5000); // Send data every 5 seconds
+}
+ 
+void connectToWiFi() {
+  Serial.print("Connecting to WiFi");
+  WiFi.begin(WIFI_AP, WIFI_PASS);
+ 
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("Connected to WiFi!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+ 
+void reconnectMQTT() {
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+ 
+    if (client.connect("ESP32Client", TOKEN, "")) {
+      Serial.println("Connected to MQTT server!");
+      // Subscribe to ThingsBoard telemetry data (optional)
+      // client.subscribe("v1/devices/me/telemetry");
+    } else {
+      Serial.print("Failed to connect to MQTT server, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      delay(5000);
+    }
+  }
+}
+ 
+void sendRandomData() {
+  int randomValue = random(0, 101); // Generate a random number between 0 and 100
+  String payload = "{\"DUMMY\":" + String(randomValue) + "}"; // Create the JSON payload
+  Serial.println("Sending data: " + payload);
+ 
+  // Send the data to the ThingsBoard server (Use the appropriate device's telemetry topic)
+  client.publish("v1/devices/me/telemetry", payload.c_str());
+}
+ 
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  // Handle incoming MQTT messages (optional)
+  Serial.print("Message arrived on topic: ");
+  Serial.print(topic);
+  Serial.print(". Message: ");
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println();
+}

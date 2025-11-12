@@ -1,0 +1,170 @@
+#ifdef ESP8266
+#include <ESP8266WiFi.h>
+#else
+#ifdef ESP32
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#endif // ESP32
+#endif // ESP8266
+
+#include <Arduino_MQTT_Client.h>
+#include <Server_Side_RPC.h>
+#include <ThingsBoard.h>
+
+#define ENCRYPTED false
+#define MAX_ADC_VALUES 1000  // Max expected number of values
+#define JSON_OVERHEAD 32    // Rough buffer overhead
+StaticJsonDocument<JSON_ARRAY_SIZE(MAX_ADC_VALUES) + JSON_OVERHEAD> doc;
+
+constexpr char WIFI_SSID[] = "IoT Server";
+constexpr char WIFI_PASSWORD[] = "Floridemar3";
+constexpr char THINGSBOARD_SERVER[] = "192.168.139.32";
+constexpr uint16_t THINGSBOARD_PORT = ENCRYPTED ? 8883U : 1883U;
+constexpr char TOKEN[] = "FU2288y6XZZqCTvjpYfN";
+constexpr uint16_t MAX_MESSAGE_SEND_SIZE = 256U;
+constexpr uint16_t MAX_MESSAGE_RECEIVE_SIZE = 256U;
+constexpr uint32_t SERIAL_DEBUG_BAUD = 115200U;
+
+constexpr char RPC_JSON_METHOD[] = "example_json";
+constexpr char RPC_TEMPERATURE_METHOD[] = "example_set_temperature";
+constexpr char RPC_SWITCH_METHOD[] = "example_set_switch";
+constexpr char RPC_TEMPERATURE_KEY[] = "temp";
+constexpr char RPC_SWITCH_KEY[] = "switch";
+constexpr uint8_t MAX_RPC_SUBSCRIPTIONS = 3U;
+constexpr uint8_t MAX_RPC_RESPONSE = 5U;
+
+#if ENCRYPTED
+WiFiClientSecure espClient;
+#else
+WiFiClient espClient;
+#endif
+
+Arduino_MQTT_Client mqttClient(espClient);
+Server_Side_RPC<MAX_RPC_SUBSCRIPTIONS, MAX_RPC_RESPONSE> rpc;
+const std::array<IAPI_Implementation*, 1U> apis = { &rpc };
+ThingsBoard tb(mqttClient, MAX_MESSAGE_RECEIVE_SIZE, MAX_MESSAGE_SEND_SIZE, Default_Max_Stack_Size, apis);
+
+bool subscribed = false;
+
+// Initialize HardwareSerial on UART2 (GPIO16=RX, 17=TX)
+HardwareSerial mySerial(2);
+
+void InitWiFi() {
+  Serial.println("Connecting to AP ...");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("Connected to AP");
+}
+
+bool reconnect() {
+  if (WiFi.status() != WL_CONNECTED) InitWiFi();
+  return true;
+}
+
+void processGetJson(const JsonVariantConst &data, JsonDocument &response) {
+  Serial.println("Received JSON RPC");
+  StaticJsonDocument<64> innerDoc;
+  innerDoc["info"] = "ok";
+  response["json_data"] = innerDoc;
+}
+
+void processTemperatureChange(const JsonVariantConst &data, JsonDocument &response) {
+  float temperature = data["temp"];
+  Serial.printf("Set temperature: %.2f\n", temperature);
+  mySerial.printf("DAC:%d\n", (int)temperature);
+  response["status"] = "done";
+}
+
+void processSwitchChange(const JsonVariantConst &data, JsonDocument &response) {
+  bool state = data["switch"];
+  Serial.printf("Set LED: %d\n", state);
+  mySerial.printf("LED:%d\n", state);
+  response["status"] = "done";
+}
+
+bool adcStreamActive = false;
+String adcToken = "";
+
+void sendUARTDataStreamed() {
+  while (mySerial.available()) {
+    char ch = mySerial.read();
+
+    // Detect start of ADC stream
+    if (!adcStreamActive) {
+      adcToken += ch;
+      if (adcToken.endsWith("ADC:[")) {
+        adcStreamActive = true;
+        adcToken = "";  // clear to start collecting values
+      } else if (adcToken.length() > 5) {
+        adcToken.remove(0, 1);  // shift buffer window
+      }
+      continue;
+    }
+
+    // If active, collect token until comma or closing bracket
+    if (ch == ',' || ch == ']') {
+      adcToken.trim();
+      if (adcToken.length() > 0) {
+        int val = adcToken.toInt();
+
+        // Send value using sendTelemetryData with a generic key like "adc_value"
+        tb.sendTelemetryData("adc_value", val);
+        Serial.println("→ adc_value: " + String(val));
+      }
+      adcToken = "";  // reset token
+
+      if (ch == ']') {
+        adcStreamActive = false;  // end of ADC stream
+      }
+    } else {
+      adcToken += ch;  // accumulate digits
+    }
+  }
+}
+
+
+void setup() {
+  Serial.begin(SERIAL_DEBUG_BAUD);
+  delay(1000);
+  InitWiFi();
+  mySerial.begin(115200, SERIAL_8N1, 16, 17);
+}
+
+void loop() {
+  if (!reconnect()) return;
+
+  if (!tb.connected()) {
+    Serial.printf("Connecting to TB: (%s) token (%s)\n", THINGSBOARD_SERVER, TOKEN);
+    if (!tb.connect(THINGSBOARD_SERVER, TOKEN, THINGSBOARD_PORT)) {
+      Serial.println("TB connect failed");
+      return;
+    }
+  }
+
+  if (!subscribed) {
+    Serial.println("Subscribing RPC...");
+    const std::array<RPC_Callback, MAX_RPC_SUBSCRIPTIONS> callbacks = {
+      RPC_Callback{"example_json", processGetJson},
+      RPC_Callback{"example_set_temperature", processTemperatureChange},
+      RPC_Callback{"example_set_switch", processSwitchChange}
+    };
+    if (!rpc.RPC_Subscribe(callbacks.cbegin(), callbacks.cend())) {
+      Serial.println("RPC subscribe failed");
+      return;
+    }
+    subscribed = true;
+  }
+ sendUARTDataStreamed();
+  tb.loop();
+
+ // if (mySerial.available()) {
+ //   String line = mySerial.readStringUntil('\n');
+ //   line.trim();
+ //   parseADCAndSend(line);
+ //}
+
+
+}

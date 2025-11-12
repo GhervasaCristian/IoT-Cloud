@@ -1,0 +1,181 @@
+#ifdef ESP8266
+  #include <ESP8266WiFi.h>
+#else
+  #ifdef ESP32
+    #include <WiFi.h>
+    #include <WiFiClientSecure.h>
+  #endif
+#endif
+
+#include <PubSubClient.h>            // for telemetry
+#include <Arduino_MQTT_Client.h>     // for RPC
+#include <Server_Side_RPC.h>
+#include <ThingsBoard.h>
+
+// ——— HARDWARE ———
+HardwareSerial mySerial(2);  // UART2: RX=16, TX=17
+#define SERIAL_BAUD 115200
+#define UART_BAUD   115200
+#define LED_PIN     2            // onboard LED
+
+// ——— WIFI & BROKER ———
+const char* WIFI_SSID     = "Reparatii Laptop 0774606388";
+const char* WIFI_PASSWORD = "Bile20kg";
+const char* TB_SERVER     = "192.168.0.194";
+const uint16_t TB_PORT    = 1883;
+const char* TOKEN         = "FU2288y6XZZqCTvjpYfN";
+
+// ——— TELEMETRY (PubSubClient) ———
+WiFiClient      espClient;
+PubSubClient    client(espClient);
+
+// ——— RPC (ThingsBoard SDK) ———
+WiFiClient            tbWiFiClient;
+Arduino_MQTT_Client   mqttClient(tbWiFiClient);
+Server_Side_RPC<3,5>  rpcHandler;
+std::array<IAPI_Implementation*,1> apis = { &rpcHandler };
+ThingsBoard           tb(mqttClient,
+                         256,  // recv buffer
+                         256,  // send buffer
+                         Default_Max_Stack_Size,
+                         apis);
+
+// track RPC subscription
+bool rpcSubscribed = false;
+
+// ——— HELPERS ———
+void connectToWiFi() {
+  Serial.print("Connecting to WiFi");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected! IP: " + WiFi.localIP().toString());
+}
+
+void reconnectMQTT() {
+  while (!client.connected()) {
+    Serial.print("MQTT connecting...");
+    if (client.connect("ESP32Client", TOKEN, "")) {
+      Serial.println("connected");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println("; retrying in 5s");
+      delay(5000);
+    }
+  }
+}
+
+void reconnectRPC() {
+  if (!tb.connected()) {
+    Serial.print("RPC MQTT connecting...");
+    if (tb.connect(TB_SERVER, TOKEN, TB_PORT)) {
+      Serial.println("connected");
+      rpcSubscribed = false;
+    } else {
+      Serial.println("failed");
+    }
+  }
+}
+
+// ——— RPC CALLBACKS ———
+void onExampleJson(const JsonVariantConst &data, JsonDocument &resp) {
+  Serial.println("[RPC] example_json");
+  StaticJsonDocument<200> d;
+  d["hello"] = "world";
+  resp["result"] = d;
+}
+
+void onSetTemperature(const JsonVariantConst &data, JsonDocument &resp) {
+  float t = data["temp"];
+  Serial.printf("[RPC] set_temperature=%.2f\n", t);
+  resp["ack"] = t;
+}
+
+void onSetSwitch(const JsonVariantConst &data, JsonDocument &resp) {
+  bool s = data["switch"];
+  Serial.printf("[RPC] set_switch=%s\n", s ? "ON":"OFF");
+  digitalWrite(LED_PIN, s ? HIGH:LOW);
+  resp["led"] = s;
+}
+
+// ——— TELEMETRY: UART → ThingsBoard via PubSubClient ———
+void sendUARTData() {
+  if (!mySerial.available()) return;
+  String line = mySerial.readStringUntil('\n');
+  line.trim();
+  if (line.length() < 3) return;
+
+  int idx = 0;
+  while (idx < line.length()) {
+    int comma = line.indexOf(',', idx);
+    String tok = comma < 0
+                 ? line.substring(idx)
+                 : line.substring(idx, comma);
+    tok.trim();
+    idx = (comma < 0) ? line.length() : comma + 1;
+    if (tok.length() < 3) continue;
+
+    String addr = tok.substring(0,2), val = tok.substring(2);
+    String key;
+    if      (addr == "00") key = "temperature";
+    else if (addr == "01") key = "humidity";
+    else if (addr == "02") key = "pressure";
+    else if (addr == "03") key = "voltage";
+    else if (addr == "04") key = "current";
+    else                   key = "sensor_" + addr;
+
+    float f = val.toFloat();
+    String payload = "{\"" + key + "\":" + String(f,2) + "}";
+    if (!client.connected()) reconnectMQTT();
+    client.publish("v1/devices/me/telemetry", payload.c_str());
+    Serial.println("TEL → " + payload);
+    delay(5);
+  }
+}
+
+void setup() {
+  Serial.begin(SERIAL_BAUD);
+  mySerial.begin(UART_BAUD, SERIAL_8N1, /*RX=*/16, /*TX=*/17);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
+  connectToWiFi();
+
+  // PubSubClient for telemetry
+  client.setServer(TB_SERVER, TB_PORT);
+
+  // ThingsBoard SDK (RPC) – no setServer/setCallback methods here
+  // We’ll reconnect in loop()
+
+  Serial.printf("Setup complete, entering loop\n");
+}
+
+void loop() {
+  // 1) Telemetry
+  if (!client.connected()) reconnectMQTT();
+  client.loop();
+  sendUARTData();
+
+  // 2) RPC
+  reconnectRPC();
+  tb.loop();
+
+  if (!rpcSubscribed && tb.connected()) {
+    std::array<RPC_Callback,3> cbs = {
+      RPC_Callback{"example_json",            onExampleJson},
+      RPC_Callback{"example_set_temperature", onSetTemperature},
+      RPC_Callback{"example_set_switch",      onSetSwitch}
+    };
+    if (rpcHandler.RPC_Subscribe(cbs.cbegin(), cbs.cend())) {
+      Serial.println("RPC subscribe ✅");
+      rpcSubscribed = true;
+    } else {
+      Serial.println("RPC subscribe ❌");
+    }
+  }
+
+  delay(50);
+}

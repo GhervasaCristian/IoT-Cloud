@@ -1,0 +1,127 @@
+#include <DHT.h>
+#define DHT11_PIN  21 // ESP32 pin GPIO21 connected to DHT11 sensor
+
+#include <WiFi.h>
+#include <PubSubClient.h>
+ 
+#define WIFI_AP "Reparatii Laptop 0774606388"
+#define WIFI_PASS "Bile20kg"
+ 
+#define TB_SERVER "192.168.0.194"
+#define TOKEN "FU2288y6XZZqCTvjpYfN"
+ 
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+DHT dht11(DHT11_PIN, DHT11);
+ 
+void setup() {
+  // Start the serial communication
+  Serial.begin(115200);
+  
+  dht11.begin(); // initialize the DHT11 sensor
+ 
+  // Connect to Wi-Fi
+  connectToWiFi();
+ 
+  // Set MQTT server and port (default port is 1883)
+  client.setServer(TB_SERVER, 1883);
+ 
+  // Set the callback function for when a message arrives
+  client.setCallback(mqttCallback);
+}
+ 
+void loop() {
+  if (!client.connected()) {
+    reconnectMQTT();
+  }
+ 
+  // Ensure the MQTT client stays connected
+  client.loop();
+
+sendRandomData(); 
+
+  delay(5000); // Send data every 5 seconds
+  
+DHT_AQ_SEND();
+
+  delay(5000); // Send data every 5 seconds
+}
+ 
+void connectToWiFi() {
+  Serial.print("Connecting to WiFi");
+  WiFi.begin(WIFI_AP, WIFI_PASS);
+ 
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("Connected to WiFi!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+ 
+void reconnectMQTT() {
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+ 
+    if (client.connect("ESP32Client", TOKEN, "")) {
+      Serial.println("Connected to MQTT server!");
+      // Subscribe to ThingsBoard telemetry data (optional)
+      // client.subscribe("v1/devices/me/telemetry");
+    } else {
+      Serial.print("Failed to connect to MQTT server, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      delay(5000);
+    }
+  }
+}
+ 
+void sendRandomData() {
+  int randomValue = random(0, 100); // Generate a random number between 0 and 100
+  String payload = "{\"DUMMY\":" + String(randomValue) + "}"; // Create the JSON payload
+  Serial.println("Sending data: " + payload);
+ 
+  // Send the data to the ThingsBoard server (Use the appropriate device's telemetry topic)
+  client.publish("v1/devices/me/telemetry", payload.c_str());
+}
+ 
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  // Handle incoming MQTT messages (optional)
+  Serial.print("Message arrived on topic: ");
+  Serial.print(topic);
+  Serial.print(". Message: ");
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println();
+}
+
+void DHT_AQ_SEND()
+{
+  // read humidity
+  float humi  = dht11.readHumidity();
+  // read temperature in Celsius
+  float tempC = dht11.readTemperature();
+  // read temperature in Fahrenheit
+  float tempF = dht11.readTemperature(true);
+  
+   if ( isnan(tempC) || isnan(tempF) || isnan(humi)) 
+    
+	{
+	float humi  = -99;
+	float tempC = -99;
+	float tempF = -99;
+	}
+	
+  
+      // Create the JSON payload with the temperature and humidity data
+    String payload = "{\"temperature\":" + String(tempC) + ",\"humidity\":" + String(humi) + "}";
+
+    // Print the data for debugging
+    Serial.println("Sending data: " + payload);
+
+    // Send the data to the ThingsBoard server (Use the appropriate device's telemetry topic)
+    client.publish("v1/devices/me/telemetry", payload.c_str());
+}
